@@ -1,0 +1,7 @@
+parameter,bess
+eta_charge,0.98
+eta_discharge,0.94
+eta_self_discharge,0.999
+soc_max,1.0
+soc_min,0.15
+t_cd_min,3.0
