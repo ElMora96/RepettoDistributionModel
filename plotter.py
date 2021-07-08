@@ -101,17 +101,20 @@ def shares_pie_plot(data,
 			error_message = \
 				'Columns names in data are not consistant, check funct doc.'
 			raise Exception(error_message)
-			
+	
 	# Normalise data
 	values_tot = data[values_col].sum()
 	if values_tot!= 1.:
 		data.loc[:, values_col] = data[values_col]/values_tot
 	
+	# Remove players whose share is 0
+	data.drop(data[data[values_col] == 0.].index, inplace=True)
+	
 	# In order to avoid too many 'little slices' (i.e., players with small
 	# share) in the pie plot, all players whose share is below a certain 
 	# threshold are grouped in the 'others' category'
-	if not 0 < values_threshold < 1: values_threshold = 0.3
-	threshold = data[values_col].quantile(values_threshold)
+	if not 0 < values_threshold < 1: values_threshold = 0.15
+	threshold = max(0.015, data[values_col].quantile(values_threshold))
 	
 	# If there are more than one player whose share is below the threshold 
 	# value, they are grouped in the 'others' category.
@@ -138,6 +141,7 @@ def shares_pie_plot(data,
 			second_group_labels.append('others')
 		else:
 			second_group_labels = list(data[second_group_col].unique())
+			second_group_labels.sort(reverse=True)
 		data.loc[:, second_group_col] = pd.Categorical(data[second_group_col],
 				   categories=second_group_labels)
 		data.sort_values(by=[second_group_col, values_col],
@@ -173,14 +177,14 @@ def shares_pie_plot(data,
 	
 	# Data in data are plotted in a pie chart
 	labels = list(data[first_group_col])
-	labels = [label.title() for label in labels]
+	labels = [label.title().replace('_', ' ') for label in labels]
 	w, l, p = \
 		ax.pie(data[values_col], labels=labels,
 		 startangle=0, colors=colors, 
 		 autopct='%1.1f%%', pctdistance=0.8, radius=0.8, labeldistance=None,
 		 frame=False, shadow=False,
 		 textprops = {'fontsize':fontsize_pielabels},
-		 wedgeprops={'edgecolor':'k', 'linewidth': 1,'linestyle': 'solid',})
+		 wedgeprops={'edgecolor':'w', 'linewidth': 2,'linestyle': '-',})
 	
 	# Each pct text is rotated in order to be radially printed, with variable
 	# distance from the centre
@@ -225,25 +229,25 @@ def shares_pie_plot(data,
 		n_slices = len(newdata)
 		
 		# Colormap to be used for the slices of the pie
-		cmap_name = 'winter'
+		cmap_name = 'Dark2'
 		cmap = plt.get_cmap(cmap_name)
 		colors = [cmap(i) for i in np.linspace(0, 1, n_slices)]
 		
 		# A second ax is generated (y axis, right) to plot the second pie
 		axtw = ax.twinx()
 		labels = list(newdata[second_group_col])
-		labels = [label.title() for label in labels]
+		labels = [label.title().replace('_', ' ') for label in labels]
 		w, l, p = \
 			axtw.pie(newdata[values_col], labels=labels,
 			startangle=0, colors=colors, radius=0.5, 
 			autopct='%1.1f%%', pctdistance=0.8, labeldistance=None,
 			frame=False, shadow=False,
 			textprops = {'fontsize':fontsize_pielabels}, 
-			wedgeprops={'edgecolor': 'k','linewidth': 1, 'linestyle': '-.'})
+			wedgeprops={'edgecolor': 'w','linewidth': 2, 'linestyle': '-'})
 		
 		# Each pct text is rotated in order to be radially printed, with
 		# variable distance from the centre
-		pctdists = np.linspace(1, 1, n_slices)
+		pctdists = np.linspace(0.8, 0.8, n_slices)
 		for t, d in zip(p, pctdists):
 			# Position of the text and distance from the centre
 			xi,yi = t.get_position()
@@ -269,7 +273,7 @@ def shares_pie_plot(data,
 	if second_pie_flag is True: radius = 0.2
 	else: radius = 0.4
 	centre_circle = \
-		plt.Circle((0,0), radius, color='black', fc='white', linewidth=1)
+		plt.Circle((0,0), radius, color='w', fc='white', linewidth=1)
 	fig = plt.gcf()
 	fig.gca().add_artist(centre_circle)
 

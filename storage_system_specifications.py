@@ -12,7 +12,7 @@ This module contains a method to restore default values for technologies
 parameters (such as efficiencies, etc.), which are saved as csv files
 '''
 
-def storage_systems_specifications(default_flag=False):
+def storage_system_specifications(default_flag=False):
     '''
     The method creates csv files containing default values for technologies
     specifications.

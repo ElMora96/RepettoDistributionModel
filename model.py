@@ -7,8 +7,11 @@
 import pandas as pd
 import numpy as np
 
-from evaluation_quicky import configuration_evaluation #To compute value function
-from systems_specifications import storage_system_specifications #Read battery specs
+
+
+from evaluation_quicky import \
+	configuration_evaluation, yearly_series 
+from storage_system_specifications import storage_system_specifications
 from plotter import shares_pie_plot
 
 import os
@@ -17,7 +20,9 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 
 #Plot configuration
-sns.set_theme() #use to reset955
+# =============================================================================
+# sns.set_theme() #use to reset955
+# =============================================================================
 sns.set_style("whitegrid")
 sns.set_context("notebook", font_scale= 2.5)
 plt.rc('figure',figsize=(32,24))
@@ -32,12 +37,12 @@ class DistributionModel:
 	#----------------------------Nested Participant class----------------------
 	class _Participant:
 		"""Constructor should not be invoked by user"""
-		def __init__(self, participant_number, name, profile_we = None, profile_wd = None):
+		def __init__(self, participant_number, name, participant_data=None,
+			   pv_production_unit_data=None):
 			"""Parameters:
 				player_number: int. 
 			"""
-			self._profile_wd = profile_wd
-			self._profile_we = profile_we
+			self._profile = participant_data
 
 			#Assign player number
 			self.participant_number = participant_number
@@ -55,17 +60,15 @@ class DistributionModel:
 			#No battery in this base formulation
 
 			#Compute player max power
-			self._grid_purchase_max = np.ceil(profile_wd.max())
+			self._grid_purchase_max = np.ceil(participant_data.max())
 
 			#Consumer / Producer flags
 			self.is_consumer = (self._grid_purchase_max != 0)
 			self.is_producer = (self._pv_size > 0)
 
 			#Compute hourly profiles (production / consumption)
-			#np.array format
-			#Call to Lorenti's Module - replace np.empty
-			self.consumption = np.empty() 
-			self.production = np.empty()
+			self.consumption = self._profile
+			self.production = pv_production_unit_data*self._pv_size
 
 
 	#----------------------------------Private Methods---------------------------------
@@ -77,23 +80,29 @@ class DistributionModel:
 		profile_we: np.array of shape (24,12)
 		pv_size: float
 		"""
-		profile_wd = np.zeros((24,12))
-		profile_we = np.zeros((24,12))
+		reference_year = self._auxiliary_dict['reference_year']
+		n_days = len(reference_year)
+		
+		time_sim = self._time_dict['time_sim']
+		time_length = time_sim.size
+
+		n_timesteps = n_days*time_length
+		
+		ue_demand_series = np.zeros((n_timesteps,))
 		pv_size = 0
 		grid_purchase_max = 0
 		for participant in self.participants:
-			profile_wd += participant._profile_wd
-			profile_we += participant._profile_we
+			ue_demand_series += participant._profile
 			pv_size += participant._pv_size
 			grid_purchase_max += participant._grid_purchase_max
 
-		return profile_wd, profile_we, pv_size, grid_purchase_max	
+		return ue_demand_series, pv_size, grid_purchase_max	
 
 
 	def _run_recopt(self, ):
 		"""Optimize configuration and return power fluxes"""
-		#Compute inputs
-		profile_wd, profile_we, pv_size, grid_purchase_max = self._config_inputs()
+		# Compute inputs
+		ue_demand_series, pv_size, grid_purchase_max = self._config_inputs()
 		# Optimization Setup
 		# Size (kW, electric)
 		pv = {'size': pv_size,}
@@ -108,28 +117,53 @@ class DistributionModel:
 		technologies_dict = {'pv': pv,
 					 'grid': grid,                      
 					}
-
-		# Electric load (kWh/h) evaluated using the routine for work- and weekend-days
-		ue_demand_months = np.zeros((self._time_length, self._n_months, self._n_day_types))
-		for day_type, data in zip(self._day_types, [profile_wd, profile_we]):
-			dd = self._day_types[day_type]['id']
-			ue_demand_months[:, :, dd] = data
-
+		
+		## Check shapes
+		# UE demand
+		series_shape = ue_demand_series.shape
+		if not series_shape == (self._n_timesteps,):
+			if series_shape == \
+				(self._time_length, self._n_months, self._n_day_types):
+				ue_demand_series = yearly_series(
+					self._time_dict,
+					ue_demand_series,
+					self._auxiliary_dict)
+			else:
+				raise ValueError('Wrong size of the consumption array')
+		# PV production
+		series_shape = self._pv_production_unit_series.shape
+		if not series_shape == (self._n_timesteps,):
+			if series_shape == \
+				(self._time_length, self._n_months, self._n_day_types):
+				ue_demand_series = yearly_series(
+					self._time_dict,
+					self._pv_production_unit_series,
+					self._auxiliary_dict)
+			else:
+				raise ValueError('Wrong size of the production array')
+		
 		# Load & Production dictionary
-		profiles_months = {'ue_demand_months': ue_demand_months, #(24x12x2)
-							'pv_production_unit_months': self._pv_production_unit_months,
-							}	
-		# Run Optimization
+		profiles_months = {
+			'ue_demand': ue_demand_series,
+			'pv_production_unit': self._pv_production_unit_series,
+			}
+		
+		# Run evaluataion of shared energy
+		series = configuration_evaluation(
+			profiles_months,
+			technologies_dict,
+			)
+		
+		shared = series['shared']
+		injections = series['pv_production']
+		withdrawals = series['ue_demand']
+		
+		print('shared: {} kWh/year'.format(np.sum(shared)*self._dt))
+		print('injections: {} kWh/year'.format(np.sum(injections)*self._dt))
+		print('withdrawals: {} kWh/year'.format(np.sum(withdrawals)*self._dt))
 
-		#Modify this to return hourly series
-		yearly_energy = configuration_evaluation(self._time_dict, 
-													profiles_months,
-													technologies_dict,
-													self._auxiliary_dict
-													)
-
-		# Compute economic value (hourly)
-		# Return it		
+		total_value = self._economic_value(shared, injections)
+		return total_value
 
 
 	def _economic_value(self, shared_energy, grid_feed, PR3 = 42,  CUAF = 8.56 , TP = 110):
@@ -147,7 +181,7 @@ class DistributionModel:
 		#Phase 1: Producer share
 		p_share = np.zeros(len(p_production)) #producer share for this participant 
 		if participant.is_producer:
-			for ix, single, total in enumerate(zip(p_production, self._total_production)):
+			for ix, (single, total) in enumerate(zip(p_production, self._total_production)):
 				#Look before you leap
 				if total == 0:
 					continue #p_share remain zero
@@ -159,7 +193,7 @@ class DistributionModel:
 		#Phase 2: Consumer share
 		c_share = np.zeros(len(p_production)) #consumer share for this participant 
 		if participant.is_consumer:
-			for ix, single, total in enumerate(zip(p_consumption, self._total_consumption)):
+			for ix, (single, total) in enumerate(zip(p_consumption, self._total_consumption)):
 				#Look before you leap
 				if total == 0:
 					continue #p_share remain zero
@@ -180,7 +214,7 @@ class DistributionModel:
 		basepath= Path(__file__).parent
 		datapath = basepath / 'Data'
 		data_folders = os.listdir(datapath)
-		participant_list = [] #Store _Participant objects
+		participants_list = [] #Store _Participant objects
 		for ix, folder in enumerate(data_folders):
 			#Workday
 			wd_path = datapath / folder / "consumption_profiles_month_wd.csv"
@@ -194,66 +228,76 @@ class DistributionModel:
 								  sep = ';',
 								  decimal= ',',
 								  ).dropna().values[:,1:]
+			
+			participant_data = np.stack((wd_data, we_data), axis=2)
+			participant_data = yearly_series(
+				self._time_dict, participant_data, self._auxiliary_dict)
+
 
 			#Instantiate new player
-			new = self._Participant(ix, folder, wd_data, we_data) #folder stays for participant name
-			participant_list.append(new)
+			new_participant = self._Participant(
+				ix,
+				folder,
+				participant_data,
+				self._pv_production_unit_series) #folder stays for participant name
+			participants_list.append(new_participant)
+			
 
-		return player_list
+		return participants_list
 	
 	#----------------Public Methods------------------
 
-	def __init__(self, eta = 0.5):
+	def __init__(self, eta = 0.7):
 		"""Create an instance of the model.
 		Parameters.
 		eta: float in [0,1]. Share of Benefit for producers.
 		"""
-		self.eta = eta
-		#Create participants
-		self.participants = self._create_participants()
-		self._n_participants = len(self.participants)
-
+		
 		################ RECOPT SETUP #############
 
 		#Auxiliary variables
 		# Seasons, storing for each season an id number and nickname
-		self._seasons = {'winter': {'id': 0, 'nickname': 'w'},
-						'spring': {'id': 1, 'nickname': 'ap'},
-						'summer': {'id': 2, 'nickname': 's'},
-						'autumn': {'id': 3, 'nickname': 'ap'},
-						}
-		# self._months, storing for each month an id number and nickname				
-		self._months = {'january': {'id': 0, 'nickname': 'jan', 'season': 'winter'},
-						'february': {'id': 1, 'nickname': 'feb', 'season': 'winter'},
-						'march': {'id': 2, 'nickname': 'mar', 'season': 'winter'},
-						'april': {'id': 3, 'nickname': 'apr', 'season': 'spring'},
-						'may': {'id': 4, 'nickname': 'may', 'season': 'spring'},
-						'june': {'id': 5, 'nickname': 'jun', 'season': 'spring'},
-						'july': {'id': 6, 'nickname': 'jul', 'season': 'summer'},
-						'august': {'id': 7, 'nickname': 'aug', 'season': 'summer'},
-						'september': {'id': 8, 'nickname': 'sep', 'season': 'summer'},
-						'october': {'id': 9, 'nickname': 'oct', 'season': 'autumn'},
-						'november': {'id': 10, 'nickname': 'nov', 'season': 'autumn'},
-						'december': {'id': 11, 'nickname': 'dec', 'season': 'autumn'},
-						}
+		self._seasons = {
+			'winter': {'id': 0, 'nickname': 'w'},
+			'spring': {'id': 1, 'nickname': 'ap'},
+			'summer': {'id': 2, 'nickname': 's'},
+			'autumn': {'id': 3, 'nickname': 'ap'},
+			}
+		# self._months, storing for each month an id number and nickname
+		self._months = {
+			'january': {'id': 0, 'nickname': 'jan', 'season': 'winter'},
+			'february': {'id': 1, 'nickname': 'feb', 'season': 'winter'},
+			'march': {'id': 2, 'nickname': 'mar', 'season': 'winter'},
+			'april': {'id': 3, 'nickname': 'apr', 'season': 'spring'},
+			'may': {'id': 4, 'nickname': 'may', 'season': 'spring'},
+			'june': {'id': 5, 'nickname': 'jun', 'season': 'spring'},
+			'july': {'id': 6, 'nickname': 'jul', 'season': 'summer'},
+			'august': {'id': 7, 'nickname': 'aug', 'season': 'summer'},
+			'september': {'id': 8, 'nickname': 'sep', 'season': 'summer'},
+			'october': {'id': 9, 'nickname': 'oct', 'season': 'autumn'},
+			'november': {'id': 10, 'nickname': 'nov', 'season': 'autumn'},
+			'december': {'id': 11, 'nickname': 'dec', 'season': 'autumn'},
+			}
 		# Day types, storing for each day type an id number and nickname
-		self._day_types = {'work-day': {'id': 0, 'nickname': 'wd'},
-							'weekend-day': {'id': 1, 'nickname': 'we'},
-							}
+		self._day_types = {
+			'work-day': {'id': 0, 'nickname': 'wd'},
+			'weekend-day': {'id': 1, 'nickname': 'we'},
+			}
 		# Distribution of both day types among all self._months
-		self._days_distr_months = {'january': {'work-day': 21, 'weekend-day': 10},
-								'february': {'work-day': 20, 'weekend-day': 8},
-								'march': {'work-day': 23, 'weekend-day': 8},
-								'april': {'work-day': 22, 'weekend-day': 8},
-								'may': {'work-day': 21, 'weekend-day': 10},
-								'june': {'work-day': 22, 'weekend-day': 8},
-								'july': {'work-day': 22, 'weekend-day': 9},
-								'august': {'work-day': 22, 'weekend-day': 9},
-								'september': {'work-day': 22, 'weekend-day': 8},
-								'october': {'work-day': 21, 'weekend-day': 10},
-								'november': {'work-day': 22, 'weekend-day': 8},
-								'december': {'work-day': 23, 'weekend-day': 8},
-								}
+		self._days_distr_months = {
+			'january': {'work-day': 21, 'weekend-day': 10},
+			'february': {'work-day': 20, 'weekend-day': 8},
+			'march': {'work-day': 23, 'weekend-day': 8},
+			'april': {'work-day': 22, 'weekend-day': 8},
+			'may': {'work-day': 21, 'weekend-day': 10},
+			'june': {'work-day': 22, 'weekend-day': 8},
+			'july': {'work-day': 22, 'weekend-day': 9},
+			'august': {'work-day': 22, 'weekend-day': 9},
+			'september': {'work-day': 22, 'weekend-day': 8},
+			'october': {'work-day': 21, 'weekend-day': 10},
+			'november': {'work-day': 22, 'weekend-day': 8},
+			'december': {'work-day': 23, 'weekend-day': 8},
+			}
 		# Number of seasons, months and day_types
 		self._n_seasons, self._n_months, self._n_day_types = \
 			len(self._seasons), len(self._months), len(self._day_types)
@@ -287,32 +331,23 @@ class DistributionModel:
 			for day_type in self._day_types:
 				dd = self._day_types[day_type]['id']
 				self._days_distr_seasons_array[ss, dd] = self._days_distr_seasons[season][day_type]
-
+				
+		
+		basepath= Path(__file__).parent
+		filename = 'year.csv'
+		self._reference_year = pd.read_csv(basepath / filename, sep=';')
+		self._n_days = len(self._reference_year)
 		# Auxiliary time dictionary
-		self._auxiliary_dict = {'seasons': self._seasons,
-							  'months': self._months,
-							  'day_types': self._day_types,
-							  'days_distr_seasons': self._days_distr_seasons,
-							  'days_distr_months': self._days_distr_months,
-							  'days_distr_months_array': self._days_distr_months_array,
-				  			}
-
-		# PV data
-		filename = 'pv_production_unit.csv'
-		self._pv_data = np.array(pd.read_csv(filename, sep=';'))
-		self._pv_production_unit_months = self._pv_data[:, 1:]
-		# Broadcasting the array in order to account for different day types
-		self._pv_production_unit_months = self._pv_production_unit_months[:, :, np.newaxis]
-		broadcaster = np.zeros((self._n_day_types,))
-		self._pv_production_unit_months = self._pv_production_unit_months + broadcaster		
-
-		# Battery specs (constant)
-		# Maximum and minimum states of charge (SOC) (%)
-		# Minimum time of charge/discharge (h)
-		# Charge, discharge and self-discharge efficiencies (-)
-		# Size is not present as it varies according to subconfiguration
-		self._bess = storage_system_specifications(default_flag=False)['bess']
-
+		self._auxiliary_dict = {
+			'seasons': self._seasons,
+			'months': self._months,
+			'day_types': self._day_types,
+			'days_distr_seasons': self._days_distr_seasons,
+			'days_distr_months': self._days_distr_months,
+			'days_distr_months_array': self._days_distr_months_array,
+			'reference_year': self._reference_year,
+			}
+		
 		# Time discretization
 		# Time-step (h)
 		self._dt = 1
@@ -325,13 +360,47 @@ class DistributionModel:
 					  'time': self._time,
 					  'time_sim': self._time_sim,
 					  }
+		
+		self._n_timesteps =  self._n_days*self._time_length
+
+		# PV data
+		filename = 'pv_production_unit.csv'
+		self._pv_data = np.array(pd.read_csv(filename, sep=';'))
+		self._pv_production_unit_months = self._pv_data[:, 1:]
+		# Broadcasting the array in order to account for different day types
+		self._pv_production_unit_months = self._pv_production_unit_months[:, :, np.newaxis]
+		broadcaster = np.zeros((self._n_day_types,))
+		self._pv_production_unit_months =  \
+			self._pv_production_unit_months + broadcaster
+		# PV production as a hourly time-series for one year
+		self._pv_production_unit_series = yearly_series(
+			self._time_dict,
+			self._pv_production_unit_months,
+			self._auxiliary_dict)
+
+		# Battery specs (constant)
+		# Maximum and minimum states of charge (SOC) (%)
+		# Minimum time of charge/discharge (h)
+		# Charge, discharge and self-discharge efficiencies (-)
+		# Size is not present as it varies according to subconfiguration
+		self._bess = storage_system_specifications(default_flag=False)['bess']
+	
+		
+		
+		self.eta = eta
+		#Create participants
+		self.participants = self._create_participants()
+		self._n_participants = len(self.participants)
+
+
 
 		#Run recopt and get quantities
-		self._run_recopt() 
-		self._total_value = np.empty(8760) #Economic value on hourly basis
+		self._total_value = self._run_recopt()
+		print(np.sum(self._total_value))
 		#aggregate values over all participants (hourly arrays)
-		self._total_production = np.sum([p.production for p in self.participants])
-		self._total_consumption = np.sum([p.consumption for p in self.participants])
+		self._total_production = np.sum([p.production for p in self.participants], axis=0)
+		self._total_consumption = np.sum([p.consumption for p in self.participants], axis=0)
+
 
 	def run(self):
 		"""Run distribution model, return shares"""
@@ -344,7 +413,7 @@ class DistributionModel:
 		#Create input dataframe
 		names = [participant.name for participant in self.participants] #participant names
 		types = [] #producers/consumers/prosumers
-		for participant in self.players:
+		for participant in self.participants:
 			if participant._pv_size > 0:
 				if participant._grid_purchase_max == 0:
 					types.append("producer")
@@ -357,8 +426,11 @@ class DistributionModel:
 								  'type': types
 							 	})
 		figure = shares_pie_plot(plot_input) #Plot data 
-		plt.show(figure)		
+		plt.show(figure)
+		plot_input['pay-off'] = shares
+		return(plot_input)
 
-			
+Distr = DistributionModel(eta=0.7)
+df = Distr.run()
 
 
